@@ -111,7 +111,7 @@ class BarcodeRenamerGUI:
             daemon=True
         ).start()
 
-        # --------------------------
+    # --------------------------
     # 產生 ZXing 用的圖像變體
     # --------------------------
     def _make_variants(self, img):

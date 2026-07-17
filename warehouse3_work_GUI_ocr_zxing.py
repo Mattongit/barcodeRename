@@ -111,85 +111,156 @@ class BarcodeRenamerGUI:
             daemon=True
         ).start()
 
+        # --------------------------
+    # 產生 ZXing 用的圖像變體
     # --------------------------
-    # Barcode Retry
+    def _make_variants(self, img):
+        """回傳 (名稱, BGR圖) 的 list，包含多種前處理"""
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        clahe = cv2.createCLAHE(
+            clipLimit=3.0, tileGridSize=(8, 8)
+        )
+        cl = clahe.apply(gray)
+        sharp_k = np.array(
+            [[-1, -1, -1],
+             [-1,  9, -1],
+             [-1, -1, -1]]
+        )
+        sharp = cv2.filter2D(gray, -1, sharp_k)
+        _, bw = cv2.threshold(
+            cl, 0, 255,
+            cv2.THRESH_BINARY + cv2.THRESH_OTSU
+        )
+        return [
+            ("color", img),
+            ("clahe", cv2.cvtColor(
+                cl, cv2.COLOR_GRAY2BGR
+            )),
+            ("gray", cv2.cvtColor(
+                gray, cv2.COLOR_GRAY2BGR
+            )),
+            ("sharp", cv2.cvtColor(
+                sharp, cv2.COLOR_GRAY2BGR
+            )),
+            ("bw", cv2.cvtColor(
+                bw, cv2.COLOR_GRAY2BGR
+            )),
+        ]
+
+    # --------------------------
+    # 對單張圖跑 ZXing（多 scale + 多變體）
+    # --------------------------
+    def _zxing_on_img(self, img, label=""):
+        """回傳第一個含13碼的文字，或 None"""
+        h, w = img.shape[:2]
+        scales = [1.0, 0.75, 0.5, 0.33, 1.5]
+        all_texts = []
+
+        for scale in scales:
+            nw = max(10, int(w * scale))
+            nh = max(10, int(h * scale))
+            resized = cv2.resize(img, (nw, nh))
+
+            for vname, vimg in self._make_variants(
+                resized
+            ):
+                try:
+                    results = zxingcpp.read_barcodes(
+                        vimg,
+                        try_rotate=True,
+                        try_downscale=True,
+                        try_invert=True,
+                    )
+                    for r in results:
+                        txt = r.text.strip()
+                        self.log(
+                            f"ZXing [{label}]"
+                            f" scale={scale}"
+                            f" {vname}:"
+                            f" {r.format} -> {txt}"
+                        )
+                        all_texts.append(txt)
+                        if re.search(r"\d{13}", txt):
+                            self.log(
+                                f"ZXing取得13碼: "
+                                f"{txt}"
+                            )
+                            return txt
+                except Exception as e:
+                    self.log(
+                        f"ZXing失敗 [{label}]"
+                        f" scale={scale}"
+                        f" {vname}: {e}"
+                    )
+
+        if all_texts:
+            return all_texts[0]
+        return None
+
+    # --------------------------
+    # Barcode Retry（裁切區域 + 多變體）
     # --------------------------
     def read_barcode_retry(self, img):
 
-        scales = [1.0, 1.5, 2.0]
+        h, w = img.shape[:2]
 
+        # 依序嘗試的裁切區域：先小範圍，最後才全圖
+        # 條碼可能在圖片任何角落，涵蓋四個象限 + 全圖
+        regions = [
+            ("下半部",     img[h//2:, :]),
+            ("下半左",     img[h//2:, :w//2]),
+            ("下半右",     img[h//2:, w//2:]),
+            ("上半部",     img[:h//2, :]),
+            ("上半左",     img[:h//2, :w//2]),
+            ("上半右",     img[:h//2, w//2:]),
+            ("全圖",       img),
+        ]
+
+        # 原圖 + 四個旋轉方向都試
         rotations = [
-            ("0", img),
-            ("90", cv2.rotate(
+            ("0",   img),
+            ("90",  cv2.rotate(
                 img, cv2.ROTATE_90_CLOCKWISE
             )),
             ("270", cv2.rotate(
-                img,
-                cv2.ROTATE_90_COUNTERCLOCKWISE
+                img, cv2.ROTATE_90_COUNTERCLOCKWISE
             )),
             ("180", cv2.rotate(
                 img, cv2.ROTATE_180
             )),
         ]
 
-        all_texts = []
+        # 先用裁切區域（只試原始方向，速度快）
+        for region_name, roi in regions:
+            if roi.size == 0:
+                continue
+            result = self._zxing_on_img(
+                roi, label=region_name
+            )
+            if result and re.search(
+                r"\d{13}", result
+            ):
+                return result
 
-        for rot_name, rot_img in rotations:
-
-            for scale in scales:
-
-                try:
-
-                    resized = cv2.resize(
-                        rot_img,
-                        None,
-                        fx=scale,
-                        fy=scale
-                    )
-
-                    results = zxingcpp.read_barcodes(
-                        resized,
-                        try_rotate=True,
-                        try_downscale=True,
-                        try_invert=True,
-                    )
-
-                    for r in results:
-
-                        txt = r.text.strip()
-
-                        self.log(
-                            f"ZXing (rot={rot_name}"
-                            f" scale={scale}): "
-                            f"{r.format} -> {txt}"
-                        )
-
-                        all_texts.append(txt)
-
-                        match = re.search(
-                            r"\d{13}",
-                            txt
-                        )
-
-                        if match:
-
-                            self.log(
-                                f"ZXing取得13碼: "
-                                f"{match.group()}"
-                            )
-
-                            return txt
-
-                except Exception as e:
-
-                    self.log(
-                        f"ZXing失敗 "
-                        f"(rot={rot_name}"
-                        f" scale={scale}): {e}"
-                    )
-
-        if all_texts:
-            return all_texts[0]
+        # 再用旋轉 + 全圖（備援）
+        for rot_name, rot_img in rotations[1:]:
+            rh, rw = rot_img.shape[:2]
+            rot_regions = [
+                (f"rot{rot_name}_下半部",
+                 rot_img[rh//2:, :]),
+                (f"rot{rot_name}_全圖",
+                 rot_img),
+            ]
+            for region_name, roi in rot_regions:
+                if roi.size == 0:
+                    continue
+                result = self._zxing_on_img(
+                    roi, label=region_name
+                )
+                if result and re.search(
+                    r"\d{13}", result
+                ):
+                    return result
 
         return None
 

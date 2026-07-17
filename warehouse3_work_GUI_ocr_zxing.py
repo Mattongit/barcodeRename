@@ -116,59 +116,77 @@ class BarcodeRenamerGUI:
     # --------------------------
     def read_barcode_retry(self, img):
 
-        scales = [
-            1.0,
-            1.5,
-            2.0
+        scales = [1.0, 1.5, 2.0]
+
+        rotations = [
+            ("0", img),
+            ("90", cv2.rotate(
+                img, cv2.ROTATE_90_CLOCKWISE
+            )),
+            ("270", cv2.rotate(
+                img,
+                cv2.ROTATE_90_COUNTERCLOCKWISE
+            )),
+            ("180", cv2.rotate(
+                img, cv2.ROTATE_180
+            )),
         ]
 
         all_texts = []
 
-        for idx, scale in enumerate(scales):
+        for rot_name, rot_img in rotations:
 
-            try:
+            for scale in scales:
 
-                resized = cv2.resize(
-                    img,
-                    None,
-                    fx=scale,
-                    fy=scale
-                )
+                try:
 
-                results = zxingcpp.read_barcodes(
-                    resized
-                )
-
-                for r in results:
-
-                    txt = r.text.strip()
-
-                    self.log(
-                        f"ZXing (scale={scale}): "
-                        f"{r.format} -> {txt}"
+                    resized = cv2.resize(
+                        rot_img,
+                        None,
+                        fx=scale,
+                        fy=scale
                     )
 
-                    all_texts.append(txt)
-
-                    match = re.search(
-                        r"\d{13}",
-                        txt
+                    results = zxingcpp.read_barcodes(
+                        resized,
+                        try_rotate=True,
+                        try_downscale=True,
+                        try_invert=True,
                     )
 
-                    if match:
+                    for r in results:
+
+                        txt = r.text.strip()
 
                         self.log(
-                            f"ZXing直接取得13碼: "
-                            f"{match.group()}"
+                            f"ZXing (rot={rot_name}"
+                            f" scale={scale}): "
+                            f"{r.format} -> {txt}"
                         )
 
-                        return txt
+                        all_texts.append(txt)
 
-            except Exception as e:
+                        match = re.search(
+                            r"\d{13}",
+                            txt
+                        )
 
-                self.log(
-                    f"ZXing Retry {idx+1}失敗: {e}"
-                )
+                        if match:
+
+                            self.log(
+                                f"ZXing取得13碼: "
+                                f"{match.group()}"
+                            )
+
+                            return txt
+
+                except Exception as e:
+
+                    self.log(
+                        f"ZXing失敗 "
+                        f"(rot={rot_name}"
+                        f" scale={scale}): {e}"
+                    )
 
         if all_texts:
             return all_texts[0]
@@ -182,10 +200,27 @@ class BarcodeRenamerGUI:
 
         h, w = img.shape[:2]
 
+        rot90 = cv2.rotate(
+            img, cv2.ROTATE_90_CLOCKWISE
+        )
+        rot270 = cv2.rotate(
+            img,
+            cv2.ROTATE_90_COUNTERCLOCKWISE
+        )
+        h90, w90 = rot90.shape[:2]
+
         regions = [
-            ("下半部", img[int(h * 0.4):h, :]),
+            ("下半部",
+             img[int(h * 0.4):h, :]),
+            ("右側",
+             img[:, int(w * 0.6):]),
             ("全圖", img),
-            ("中間", img[int(h * 0.25):int(h * 0.75), :]),
+            ("rot90_下半部",
+             rot90[int(h90 * 0.4):h90, :]),
+            ("rot90_全圖", rot90),
+            ("rot270_下半部",
+             rot270[int(h90 * 0.4):h90, :]),
+            ("rot270_全圖", rot270),
         ]
 
         for region_name, roi in regions:
@@ -268,6 +303,45 @@ class BarcodeRenamerGUI:
 
         psm_modes = ["6", "11", "3"]
 
+        # Pass 1: 不加白名單，找真實的13位數字序列
+        for prep_name, processed in preprocess_list:
+
+            for psm in psm_modes:
+
+                try:
+
+                    config = f"--psm {psm}"
+
+                    text = pytesseract.image_to_string(
+                        processed,
+                        config=config
+                    )
+
+                    match = re.search(
+                        r"\d{13}",
+                        text
+                    )
+
+                    if match:
+
+                        self.log(
+                            f"OCR[{region_name}]"
+                            f"[{prep_name}]"
+                            f"[psm{psm}]: "
+                            f"{text.strip()[:80]}"
+                        )
+
+                        self.log(
+                            f"OCR取得13碼: "
+                            f"{match.group()}"
+                        )
+
+                        return match.group()
+
+                except Exception:
+                    pass
+
+        # Pass 2: 白名單限定數字（備援）
         for prep_name, processed in preprocess_list:
 
             for psm in psm_modes:
@@ -292,7 +366,7 @@ class BarcodeRenamerGUI:
                     self.log(
                         f"OCR[{region_name}]"
                         f"[{prep_name}]"
-                        f"[psm{psm}]: "
+                        f"[psm{psm}][WL]: "
                         f"{digits[:60]}"
                     )
 
